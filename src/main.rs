@@ -61,10 +61,14 @@ fn should_include_demo(content: &mut String, filter_ks_only: bool) -> (bool, &'s
 }
 
 fn get_output_name() -> String {
-    Local::now()
-        .naive_local()
-        .format("demclean-%Y-%m-%d-%H-%M-%S")
-        .to_string()
+    static TIME: Lazy<String> = Lazy::new(|| {
+        Local::now()
+            .naive_local()
+            .format("demclean-%Y-%m-%d-%H-%M-%S")
+            .to_string()
+    });
+    
+    TIME.clone()
 }
 
 fn action_move_copy(demos_dir: &Path, files: &mut [IncludedFile]) -> Result<(), anyhow::Error> {
