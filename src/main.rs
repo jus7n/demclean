@@ -1,10 +1,10 @@
+mod ds;
+mod prec;
+mod util;
+
 use anyhow::anyhow;
-use chrono::Local;
 use colored::Colorize;
-use inquire::{Confirm, MultiSelect, Text};
-use once_cell::sync::Lazy;
-use regex::Regex;
-use std::ffi::OsStr;
+use inquire::{Confirm, MultiSelect, Select, Text};
 use std::fmt::{Display, Formatter};
 use std::fs::OpenOptions;
 use std::io::{stdin, BufWriter, Read, Write};
@@ -25,55 +25,55 @@ impl Display for IncludedFilesAction {
     }
 }
 
-struct IncludedFile {
+pub struct IncludedDemo {
     inclusion_reason: &'static str,
     demo_path: PathBuf,
-    events_json_path: PathBuf,
+    // DemoSupport specific
+    events_json_path: Option<PathBuf>,
+    // 'demosupport', 'prec', etc.
+    id: &'static str,
 }
 
-fn should_include_demo(content: &mut String, filter_ks_only: bool) -> (bool, &'static str) {
-    // This regex matches event types
-    // Example: '"name": "Bookmark",' => Bookmark
-    static EVENT_TYPE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#""name":\s?+"(.*?)","#).unwrap());
-
-    const EMPTY_EVENTS: &str = r#"{"events":[]}"#;
-
-    // Remove whitespace
-    content.retain(|c| !c.is_whitespace());
-
-    // No events
-    if content == EMPTY_EVENTS {
-        return (true, "no events");
-    }
-
-    if filter_ks_only {
-        for (_, [event_type]) in EVENT_TYPE_RE.captures_iter(content).map(|c| c.extract()) {
-            if !event_type.eq_ignore_ascii_case("killstreak") {
-                // This demo contains an event type that is not a killstreak and should not be included
-                return (false, "has custom bookmark");
-            }
+impl IncludedDemo {
+    pub fn move_to(&mut self, copy: bool, output_dir: &Path) -> Result<(), anyhow::Error> {
+        let output_dir = output_dir.join(&self.id);
+        if !output_dir.exists() {
+            std::fs::create_dir(&output_dir)?;
         }
 
-        return (true, "has only killstreak events");
+        let file_op = |from: &PathBuf, to: &PathBuf| match copy {
+            true => std::fs::copy(from, to).map(|_| ()),
+            false => std::fs::rename(from, to),
+        };
+
+        let move_file = |path: &mut PathBuf| -> Result<(), anyhow::Error> {
+            let file_name = path.file_name().unwrap();
+            let new_path = output_dir.join(file_name);
+
+            file_op(path, &new_path)?;
+
+            let verb = if copy { "Copied" } else { "Moved" };
+            println!("{}", format!("\t{} {:?}", verb, file_name).italic());
+
+            if !copy {
+                *path = new_path;
+            }
+
+            Ok(())
+        };
+
+        move_file(&mut self.demo_path)?;
+        if let Some(events_json_path) = &mut self.events_json_path {
+            move_file(events_json_path)?;
+        }
+
+        Ok(())
     }
-
-    (false, "has events")
 }
 
-fn get_output_name() -> String {
-    static TIME: Lazy<String> = Lazy::new(|| {
-        Local::now()
-            .naive_local()
-            .format("demclean-%Y-%m-%d-%H-%M-%S")
-            .to_string()
-    });
-    
-    TIME.clone()
-}
-
-fn action_move_copy(demos_dir: &Path, files: &mut [IncludedFile]) -> Result<(), anyhow::Error> {
-    let default_dir = demos_dir.join(get_output_name());
-    let output_dir = Text::new("Output directory")
+fn action_move_copy(demos_dir: &Path, files: &mut [IncludedDemo]) -> Result<(), anyhow::Error> {
+    let default_dir = demos_dir.join(util::get_output_name());
+    let output_dir = Text::new("Output directory?")
         .with_default(default_dir.to_str().unwrap())
         .prompt()
         .unwrap();
@@ -92,31 +92,8 @@ fn action_move_copy(demos_dir: &Path, files: &mut [IncludedFile]) -> Result<(), 
 
     let verb = if copy { "Copied" } else { "Moved" };
 
-    let file_op = if copy {
-        |from: &PathBuf, to: &PathBuf| match std::fs::copy(from, to) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
-    } else {
-        |from: &PathBuf, to: &PathBuf| std::fs::rename(from, to)
-    };
-
     for file in files.iter_mut() {
-        let demo_name = file.demo_path.file_name().unwrap();
-        let new_path = output_dir.join(demo_name);
-        file_op(&file.demo_path, &new_path)?;
-        println!("{}", format!("\t{} {:?}", verb, demo_name).italic());
-        if !copy {
-            file.demo_path = new_path;
-        }
-
-        let events_json_name = file.events_json_path.file_name().unwrap();
-        let new_path = output_dir.join(events_json_name);
-        file_op(&file.events_json_path, &new_path)?;
-        println!("{}", format!("\t{} {:?}", verb, events_json_name).italic());
-        if !copy {
-            file.events_json_path = new_path;
-        }
+        file.move_to(copy, output_dir)?;
     }
 
     println!(
@@ -133,14 +110,17 @@ fn action_move_copy(demos_dir: &Path, files: &mut [IncludedFile]) -> Result<(), 
     Ok(())
 }
 
-fn action_export(demos_dir: &Path, files: &Vec<IncludedFile>) -> Result<(), anyhow::Error> {
-    let default_path = demos_dir.join(get_output_name()).with_extension("txt");
-    let output_path = Text::new("Output file")
+fn action_export(demos_dir: &Path, files: &Vec<IncludedDemo>) -> Result<(), anyhow::Error> {
+    let default_path = demos_dir
+        .join(util::get_output_name())
+        .with_extension("txt");
+    let output_path = Text::new("Output file?")
         .with_default(default_path.to_str().unwrap())
         .prompt()
         .unwrap();
 
     let include_json = Confirm::new("Export event json paths?")
+        .with_help_message("Only applicable to DemoSupport demos")
         .with_default(true)
         .prompt()
         .unwrap();
@@ -162,9 +142,11 @@ fn action_export(demos_dir: &Path, files: &Vec<IncludedFile>) -> Result<(), anyh
         writer.write_all(&path_to_bytes(&file.demo_path))?;
         writer.write_all(b"\n")?;
         if include_json {
-            writer.write_all(&path_to_bytes(&file.events_json_path))?;
-            writer.write_all(b"\n")?;
-            count += 1;
+            if let Some(events_json_path) = &file.events_json_path {
+                writer.write_all(&path_to_bytes(events_json_path))?;
+                writer.write_all(b"\n")?;
+                count += 1;
+            }
         }
         count += 1;
     }
@@ -178,12 +160,16 @@ fn action_export(demos_dir: &Path, files: &Vec<IncludedFile>) -> Result<(), anyh
 }
 
 fn process() -> Result<(), anyhow::Error> {
-    let demos_path = Text::new("Demos directory").prompt().unwrap();
+    let demos_path = Text::new("Demos directory?").prompt().unwrap();
 
     let demos_dir = Path::new(&demos_path);
     if !demos_dir.exists() {
         return Err(anyhow!("Directory {:?} does not exist", demos_dir));
     }
+
+    let demo_mode = Select::new("Demo search mode?", vec!["DemoSupport", "PREC"])
+        .prompt()
+        .unwrap();
 
     println!(
         "\
@@ -202,52 +188,22 @@ This will exclude demos that contain custom bookmarks (added via 'ds_mark', etc.
         if include_ks_only { "" } else { "not " }
     );
 
-    let mut included_files = vec![];
+    let mut included_demos = vec![];
 
-    fn is_demo(ext: &Option<&OsStr>) -> bool {
-        ext.and_then(OsStr::to_str)
-            .map_or(false, |str| str == "dem")
+    if demo_mode == "PREC" {
+        println!("{}", "Searching for PREC demos...".bright_green());
+        prec::collect_prec_demos(demos_dir, include_ks_only, &mut included_demos)?;
+    } else {
+        println!("{}", "Searching for DemoSupport demos...".bright_green());
+        ds::collect_ds_demos(demos_dir, include_ks_only, &mut included_demos)?;
     }
 
-    for entry in std::fs::read_dir(demos_dir)?
-        .map(|e| e.unwrap())
-        .filter(|e| is_demo(&e.path().extension()))
-    {
-        let entry_path = entry.path();
-        let file_name = entry_path.file_name().unwrap();
-        let json_path = entry_path.with_extension("json");
-
-        if !json_path.exists() {
-            println!("Can't find json events file for demo {:?}", file_name);
-            continue;
-        }
-
-        let (should_include, reason) = match std::fs::read_to_string(&json_path) {
-            Ok(mut content) => should_include_demo(&mut content, include_ks_only),
-            Err(e) => {
-                eprintln!("Failed to read events json file {:?}: {:?}", json_path, e);
-                (false, "failed to read json")
-            }
-        };
-
-        if !should_include {
-            println!("{} {:?}: {}", "Skipping".red(), file_name, reason);
-            continue;
-        }
-
-        included_files.push(IncludedFile {
-            inclusion_reason: reason,
-            demo_path: entry_path.clone(),
-            events_json_path: json_path.clone(),
-        });
-    }
-
-    if included_files.is_empty() {
+    if included_demos.is_empty() {
         println!("{}", "There are no included demos.".bright_red());
         return Ok(());
     }
 
-    for file in &included_files {
+    for file in &included_demos {
         println!(
             "{} {:?}: {}",
             "Including".bright_green(),
@@ -257,7 +213,7 @@ This will exclude demos that contain custom bookmarks (added via 'ds_mark', etc.
     }
 
     let actions = MultiSelect::new(
-        &format!("Action for {} files", included_files.len()),
+        &format!("Action for {} files", included_demos.len()),
         vec![IncludedFilesAction::MoveCopy, IncludedFilesAction::Export],
     )
     .prompt()
@@ -265,8 +221,8 @@ This will exclude demos that contain custom bookmarks (added via 'ds_mark', etc.
 
     for action in actions {
         match action {
-            IncludedFilesAction::MoveCopy => action_move_copy(demos_dir, &mut included_files)?,
-            IncludedFilesAction::Export => action_export(demos_dir, &included_files)?,
+            IncludedFilesAction::MoveCopy => action_move_copy(demos_dir, &mut included_demos)?,
+            IncludedFilesAction::Export => action_export(demos_dir, &included_demos)?,
         }
     }
 
@@ -285,6 +241,7 @@ fn main() -> Result<(), anyhow::Error> {
         wait_key();
         return Err(e);
     }
+
     println!("{}", "Done.".bright_green());
     wait_key();
     Ok(())
