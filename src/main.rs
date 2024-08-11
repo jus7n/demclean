@@ -36,7 +36,7 @@ pub struct IncludedDemo {
 
 impl IncludedDemo {
     pub fn move_to(&mut self, copy: bool, output_dir: &Path) -> Result<(), anyhow::Error> {
-        let output_dir = output_dir.join(&self.id);
+        let output_dir = output_dir.join(self.id);
         if !output_dir.exists() {
             std::fs::create_dir(&output_dir)?;
         }

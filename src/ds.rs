@@ -2,7 +2,7 @@ use crate::{util, IncludedDemo};
 use colored::Colorize;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // This regex matches event types
 // Example: '"name": "Bookmark",' => Bookmark
